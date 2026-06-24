@@ -24,12 +24,28 @@ from backend.models.schemas import (
 )
 
 
+async def _check_langfuse(settings: Settings) -> None:
+    """Ping Langfuse health endpoint at startup. Logs success or failure — never raises."""
+    import httpx
+    url = f"{settings.langfuse_host.rstrip('/')}/api/public/health"
+    try:
+        async with httpx.AsyncClient(timeout=5.0) as client:
+            resp = await client.get(url)
+            resp.raise_for_status()
+        logger.info(f"Langfuse connection verified → {settings.langfuse_host}")
+    except Exception as e:
+        logger.error(
+            f"Langfuse connection FAILED — traces will not appear in cloud.langfuse.com: {e}"
+        )
+
+
 @asynccontextmanager
 async def lifespan(_app: FastAPI) -> AsyncGenerator[None, None]:
     settings = get_settings()
     logger.info(f"Starting TestPilot AI [{settings.app_env}]")
     await init_db(settings.database_url)
     _ensure_sqs_queue(settings)
+    await _check_langfuse(settings)
 
     # Start SQS consumer as a background task
     from backend.job_processor import consume_jobs

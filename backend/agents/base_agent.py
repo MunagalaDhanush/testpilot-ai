@@ -6,7 +6,7 @@ from abc import ABC, abstractmethod
 from typing import Any
 
 from anthropic import AsyncAnthropic, APIError, APITimeoutError
-from langfuse import Langfuse
+from langfuse import observe
 from loguru import logger
 
 from backend.config import get_settings
@@ -20,30 +20,19 @@ class BaseAgent(ABC):
         self.agent_name = agent_name
         settings = get_settings()
         self._anthropic = AsyncAnthropic(api_key=settings.anthropic_api_key)
-        self._langfuse = Langfuse(
-            public_key=settings.langfuse_public_key,
-            secret_key=settings.langfuse_secret_key,
-            host=settings.langfuse_host,
-        )
+        # Langfuse v4: @observe reads LANGFUSE_PUBLIC_KEY, LANGFUSE_SECRET_KEY,
+        # LANGFUSE_HOST from env automatically — no client instantiation needed.
 
     @abstractmethod
     async def _execute(self, state: PipelineState) -> tuple[PipelineState, int, int]:
-        """
-        Agent-specific logic.
-        Returns (updated_state, input_tokens, output_tokens).
-        Token counts go to Langfuse/DB — they never pollute the pipeline state.
-        """
+        """Returns (updated_state, input_tokens, output_tokens)."""
 
+    @observe()
     async def run(self, state: PipelineState) -> PipelineState:
         job_id = state.get("job_id", "unknown")
         log = logger.bind(agent=self.agent_name, job_id=job_id, model=self.model_name)
         log.info("Starting agent")
 
-        trace = self._langfuse.trace(
-            name=self.agent_name,
-            metadata={"job_id": job_id, "model": self.model_name},
-        )
-        span = trace.span(name="run")
         start_ms = time.monotonic_ns() // 1_000_000
         last_error: Exception | None = None
 
@@ -52,32 +41,30 @@ class BaseAgent(ABC):
                 result_state, input_tokens, output_tokens = await self._execute(state)
                 elapsed_ms = (time.monotonic_ns() // 1_000_000) - start_ms
 
-                span.end(metadata={
-                    "attempt": attempt,
-                    "latency_ms": elapsed_ms,
-                    "input_tokens": input_tokens,
-                    "output_tokens": output_tokens,
-                })
                 await self._save_trace(
                     job_id=job_id,
                     input_tokens=input_tokens,
                     output_tokens=output_tokens,
                     latency_ms=elapsed_ms,
                 )
-                log.info(f"Agent completed in {elapsed_ms}ms "
-                         f"(in={input_tokens} out={output_tokens} tokens)")
+
+                log.info(
+                    f"Agent completed in {elapsed_ms}ms "
+                    f"(in={input_tokens} out={output_tokens} tokens)"
+                )
                 return result_state
 
             except (APIError, APITimeoutError) as e:
                 last_error = e
                 wait = 2 ** attempt
-                log.warning(f"Attempt {attempt}/3 failed ({type(e).__name__}): {e}. "
-                             f"Retrying in {wait}s")
+                log.warning(
+                    f"Attempt {attempt}/3 failed ({type(e).__name__}): {e}. "
+                    f"Retrying in {wait}s"
+                )
                 if attempt < 3:
                     await asyncio.sleep(wait)
 
         elapsed_ms = (time.monotonic_ns() // 1_000_000) - start_ms
-        span.end(metadata={"failed": True, "latency_ms": elapsed_ms})
         error_msg = f"{self.agent_name} failed after 3 attempts: {last_error}"
         log.error(error_msg)
         return {**state, "errors": [error_msg]}
@@ -88,7 +75,7 @@ class BaseAgent(ABC):
         system: str | None = None,
         max_tokens: int = 4096,
     ) -> tuple[str, int, int]:
-        """Call Anthropic. Returns (text, input_tokens, output_tokens)."""
+        """Returns (text, input_tokens, output_tokens)."""
         kwargs: dict[str, Any] = {
             "model": self.model_name,
             "max_tokens": max_tokens,
