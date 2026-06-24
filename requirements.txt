@@ -1,0 +1,45 @@
+# Web framework
+fastapi==0.115.6
+uvicorn[standard]==0.34.0
+
+# LangGraph / LangChain
+langgraph==0.2.62
+langchain-anthropic==0.3.4
+langchain-core>=0.3.31,<0.4.0
+
+# Anthropic SDK
+anthropic==0.44.0
+
+# Observability
+langfuse==2.57.5
+
+# AWS
+boto3==1.35.93
+botocore==1.35.93
+
+# Database
+asyncpg==0.30.0
+
+# Pydantic
+pydantic==2.10.5
+pydantic-settings==2.7.1
+
+# Environment
+python-dotenv==1.0.1
+
+# HTTP client
+httpx==0.28.1
+
+# Logging
+loguru==0.7.3
+
+# Docker SDK
+docker==7.1.0
+
+# Testing
+pytest==8.3.4
+pytest-asyncio==0.25.0
+pytest-httpx==0.35.0
+
+# SQLAlchemy (for migrations)
+sqlalchemy==2.0.36
