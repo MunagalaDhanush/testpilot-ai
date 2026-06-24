@@ -14,9 +14,25 @@ services:
       DATABASE_URL: postgresql://testpilot:testpilot@postgres:5432/testpilot
       AWS_ENDPOINT_URL: http://localstack:4566
       SQS_QUEUE_URL: http://localstack:4566/000000000000/testpilot-jobs
+      LANGFUSE_DEBUG: "true"
     depends_on:
       postgres:
         condition: service_healthy
+    restart: unless-stopped
+
+  frontend:
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile
+    pull_policy: build
+    ports:
+      - "3000:3000"
+    env_file:
+      - .env
+    environment:
+      NEXT_PUBLIC_API_URL: http://localhost:8000
+    depends_on:
+      - api
     restart: unless-stopped
 
   postgres:

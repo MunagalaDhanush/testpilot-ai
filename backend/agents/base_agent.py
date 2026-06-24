@@ -6,7 +6,6 @@ from abc import ABC, abstractmethod
 from typing import Any
 
 from anthropic import AsyncAnthropic, APIError, APITimeoutError
-from langfuse import observe
 from loguru import logger
 
 from backend.config import get_settings
@@ -20,14 +19,11 @@ class BaseAgent(ABC):
         self.agent_name = agent_name
         settings = get_settings()
         self._anthropic = AsyncAnthropic(api_key=settings.anthropic_api_key)
-        # Langfuse v4: @observe reads LANGFUSE_PUBLIC_KEY, LANGFUSE_SECRET_KEY,
-        # LANGFUSE_HOST from env automatically — no client instantiation needed.
 
     @abstractmethod
     async def _execute(self, state: PipelineState) -> tuple[PipelineState, int, int]:
         """Returns (updated_state, input_tokens, output_tokens)."""
 
-    @observe()
     async def run(self, state: PipelineState) -> PipelineState:
         job_id = state.get("job_id", "unknown")
         log = logger.bind(agent=self.agent_name, job_id=job_id, model=self.model_name)

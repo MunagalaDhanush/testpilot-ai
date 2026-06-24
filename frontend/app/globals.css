@@ -1,0 +1,130 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+:root {
+  --bg: #050508;
+  --surface: #0d0d14;
+  --border: #1a1a2e;
+  --cyan: #00d4ff;
+  --violet: #7c3aed;
+  --success: #00ff88;
+  --warning: #f59e0b;
+  --danger: #ef4444;
+  --text-primary: #f1f5f9;
+  --text-secondary: #94a3b8;
+  --text-muted: #475569;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+body {
+  background-color: var(--bg);
+  color: var(--text-primary);
+  font-family: 'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+  font-weight: 500;
+  -webkit-font-smoothing: antialiased;
+}
+
+/* ── Scrollbar ───────────────────────────────────────────────────────────── */
+::-webkit-scrollbar { width: 5px; height: 5px; }
+::-webkit-scrollbar-track { background: var(--bg); }
+::-webkit-scrollbar-thumb { background: #2a2a3e; border-radius: 3px; }
+::-webkit-scrollbar-thumb:hover { background: #3a3a4e; }
+
+/* ── Glow utilities ──────────────────────────────────────────────────────── */
+.glow-cyan    { box-shadow: 0 0 24px rgba(0, 212, 255, 0.18); }
+.glow-violet  { box-shadow: 0 0 24px rgba(124, 58, 237, 0.18); }
+.glow-success { box-shadow: 0 0 24px rgba(0, 255, 136, 0.18); }
+.glow-danger  { box-shadow: 0 0 24px rgba(239, 68, 68, 0.18); }
+.glow-warning { box-shadow: 0 0 24px rgba(245, 158, 11, 0.18); }
+
+/* ── Text glow ───────────────────────────────────────────────────────────── */
+.text-glow-cyan   { text-shadow: 0 0 14px rgba(0, 212, 255, 0.5); }
+.text-glow-violet { text-shadow: 0 0 14px rgba(124, 58, 237, 0.5); }
+
+/* ── Stat tile hover ─────────────────────────────────────────────────────── */
+.stat-tile {
+  transition: transform 0.2s ease, box-shadow 0.2s ease;
+}
+.stat-tile:hover {
+  transform: translateY(-2px);
+}
+
+/* ── Timeline line ───────────────────────────────────────────────────────── */
+.timeline-line {
+  width: 2px;
+  background: linear-gradient(to bottom, var(--cyan), var(--violet));
+}
+
+/* ── Animated progress bar ───────────────────────────────────────────────── */
+@keyframes progress-slide {
+  0%   { transform: translateX(-100%); }
+  100% { transform: translateX(300%); }
+}
+.progress-indeterminate {
+  animation: progress-slide 1.4s ease-in-out infinite;
+}
+
+/* ── Tooltip ─────────────────────────────────────────────────────────────── */
+.tooltip-container { position: relative; }
+.tooltip-text {
+  visibility: hidden;
+  background: #13131f;
+  color: #e2e8f0;
+  border: 1px solid #2a2a3e;
+  border-radius: 8px;
+  padding: 8px 12px;
+  font-size: 12px;
+  font-weight: 500;
+  line-height: 1.5;
+  max-width: 240px;
+  white-space: normal;
+  position: absolute;
+  top: calc(100% + 8px);
+  right: 0;
+  z-index: 60;
+  pointer-events: none;
+  box-shadow: 0 4px 20px rgba(0,0,0,0.5);
+}
+.tooltip-container:hover .tooltip-text { visibility: visible; }
+
+/* ── Prose (react-markdown) ──────────────────────────────────────────────── */
+.prose-dark { color: #cbd5e1; line-height: 1.7; }
+.prose-dark h1, .prose-dark h2, .prose-dark h3 { color: #f1f5f9; margin: 1em 0 0.5em; font-weight: 700; }
+.prose-dark p { margin: 0.5em 0; }
+.prose-dark code {
+  background: #1a1a2e;
+  padding: 0.15em 0.4em;
+  border-radius: 4px;
+  font-size: 0.875em;
+  color: var(--cyan);
+  font-family: 'JetBrains Mono', 'Fira Code', monospace;
+}
+.prose-dark pre { margin: 1em 0; }
+.prose-dark ul, .prose-dark ol { padding-left: 1.5em; margin: 0.5em 0; }
+.prose-dark li { margin: 0.25em 0; }
+.prose-dark a { color: var(--cyan); text-decoration: underline; }
+.prose-dark blockquote {
+  border-left: 3px solid var(--violet);
+  padding-left: 1em;
+  color: #94a3b8;
+}
+
+/* ── Chat drawer ─────────────────────────────────────────────────────────── */
+.chat-drawer {
+  transition: transform 0.3s cubic-bezier(0.4, 0, 0.2, 1);
+}
+.chat-drawer.closed { transform: translateX(100%); }
+.chat-drawer.open   { transform: translateX(0); }
+
+/* ── Typing dots ─────────────────────────────────────────────────────────── */
+@keyframes bounce-dot {
+  0%, 80%, 100% { transform: translateY(0); }
+  40%           { transform: translateY(-5px); }
+}
+.typing-dot:nth-child(1) { animation: bounce-dot 1.2s infinite 0s; }
+.typing-dot:nth-child(2) { animation: bounce-dot 1.2s infinite 0.2s; }
+.typing-dot:nth-child(3) { animation: bounce-dot 1.2s infinite 0.4s; }

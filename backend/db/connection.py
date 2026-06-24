@@ -46,11 +46,32 @@ async def create_tables() -> None:
                 pr_title TEXT,
                 diff_content TEXT,
                 status TEXT DEFAULT 'queued',
+                source TEXT DEFAULT 'webhook',
                 risk_level TEXT,
+                final_summary TEXT,
+                tests_generated INTEGER DEFAULT 0,
+                pass_count INTEGER DEFAULT 0,
+                fail_count INTEGER DEFAULT 0,
+                coverage_delta FLOAT DEFAULT 0.0,
+                human_approved BOOLEAN DEFAULT NULL,
+                human_reviewed_at TIMESTAMPTZ,
                 created_at TIMESTAMPTZ DEFAULT NOW(),
                 updated_at TIMESTAMPTZ DEFAULT NOW()
             )
         """)
+
+        # Idempotent migrations for existing deployments
+        for col_ddl in [
+            "ALTER TABLE jobs ADD COLUMN IF NOT EXISTS final_summary TEXT",
+            "ALTER TABLE jobs ADD COLUMN IF NOT EXISTS tests_generated INTEGER DEFAULT 0",
+            "ALTER TABLE jobs ADD COLUMN IF NOT EXISTS pass_count INTEGER DEFAULT 0",
+            "ALTER TABLE jobs ADD COLUMN IF NOT EXISTS fail_count INTEGER DEFAULT 0",
+            "ALTER TABLE jobs ADD COLUMN IF NOT EXISTS coverage_delta FLOAT DEFAULT 0.0",
+            "ALTER TABLE jobs ADD COLUMN IF NOT EXISTS human_approved BOOLEAN DEFAULT NULL",
+            "ALTER TABLE jobs ADD COLUMN IF NOT EXISTS human_reviewed_at TIMESTAMPTZ",
+            "ALTER TABLE jobs ADD COLUMN IF NOT EXISTS source TEXT DEFAULT 'webhook'",
+        ]:
+            await conn.execute(col_ddl)
 
         await conn.execute("""
             CREATE TABLE IF NOT EXISTS agent_traces (
@@ -80,4 +101,4 @@ async def create_tables() -> None:
             )
         """)
 
-    logger.info("Database tables created (if not existed).")
+    logger.info("Database tables ready.")

@@ -6,6 +6,7 @@ import hmac
 import json
 import uuid
 from contextlib import asynccontextmanager
+from datetime import datetime, timezone
 from typing import Annotated, Any, AsyncGenerator
 
 import boto3
@@ -16,16 +17,19 @@ from loguru import logger
 from backend.config import Settings, get_settings
 from backend.db.connection import close_db, get_pool, init_db
 from backend.models.schemas import (
+    AnalyzeJobRequest,
+    AnalyticsResponse,
     HealthResponse,
     JobCreate,
     JobListResponse,
+    JobListStats,
     JobResponse,
+    SystemStatusResponse,
     WebhookGitHubPayload,
 )
 
 
 async def _check_langfuse(settings: Settings) -> None:
-    """Ping Langfuse health endpoint at startup. Logs success or failure — never raises."""
     import httpx
     url = f"{settings.langfuse_host.rstrip('/')}/api/public/health"
     try:
@@ -34,9 +38,7 @@ async def _check_langfuse(settings: Settings) -> None:
             resp.raise_for_status()
         logger.info(f"Langfuse connection verified → {settings.langfuse_host}")
     except Exception as e:
-        logger.error(
-            f"Langfuse connection FAILED — traces will not appear in cloud.langfuse.com: {e}"
-        )
+        logger.error(f"Langfuse connection FAILED: {e}")
 
 
 @asynccontextmanager
@@ -47,7 +49,6 @@ async def lifespan(_app: FastAPI) -> AsyncGenerator[None, None]:
     _ensure_sqs_queue(settings)
     await _check_langfuse(settings)
 
-    # Start SQS consumer as a background task
     from backend.job_processor import consume_jobs
     consumer_task = asyncio.create_task(consume_jobs(), name="sqs-consumer")
 
@@ -85,13 +86,13 @@ def _get_sqs_client(settings: Settings) -> Any:
 app = FastAPI(
     title="TestPilot AI",
     description="Multi-agent automated test generation platform",
-    version="0.2.0",
+    version="0.3.0",
     lifespan=lifespan,
 )
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=get_settings().cors_origins_list,
+    allow_origins=["*"],
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -124,16 +125,17 @@ async def _create_job_record(
     pr_number: int,
     pr_title: str | None = None,
     diff_content: str | None = None,
+    source: str = "webhook",
 ) -> str:
     job_id = str(uuid.uuid4())
     async with pool.acquire() as conn:
         await conn.execute(
             """
             INSERT INTO jobs
-                (id, pr_url, repo_name, pr_number, pr_title, diff_content, status)
-            VALUES ($1::uuid, $2, $3, $4, $5, $6, 'queued')
+                (id, pr_url, repo_name, pr_number, pr_title, diff_content, status, source)
+            VALUES ($1::uuid, $2, $3, $4, $5, $6, 'queued', $7)
             """,
-            job_id, pr_url, repo_name, pr_number, pr_title, diff_content,
+            job_id, pr_url, repo_name, pr_number, pr_title, diff_content, source,
         )
     return job_id
 
@@ -166,8 +168,31 @@ async def _fetch_job_with_traces(pool: Any, job_id: str) -> dict[str, Any] | Non
     return job
 
 
+async def _compute_list_stats(pool: Any) -> JobListStats:
+    async with pool.acquire() as conn:
+        row = await conn.fetchrow(
+            """
+            SELECT
+                COALESCE(SUM(tests_generated), 0)::int AS total_tests,
+                AVG(
+                    CASE WHEN pass_count + fail_count > 0
+                         THEN pass_count::float / (pass_count + fail_count) * 100
+                    END
+                ) AS avg_pass_rate,
+                AVG(NULLIF(coverage_delta, 0)) AS avg_coverage_delta
+            FROM jobs
+            WHERE status IN ('completed', 'awaiting_review', 'rejected')
+            """
+        )
+    return JobListStats(
+        total_tests_generated=row["total_tests"] or 0,
+        avg_pass_rate=round(row["avg_pass_rate"], 1) if row["avg_pass_rate"] else None,
+        avg_coverage_delta=round(row["avg_coverage_delta"], 2) if row["avg_coverage_delta"] else None,
+    )
+
+
 # ---------------------------------------------------------------------------
-# Routes
+# Routes — jobs
 # ---------------------------------------------------------------------------
 
 @app.post("/webhook/github", status_code=status.HTTP_202_ACCEPTED)
@@ -177,100 +202,133 @@ async def webhook_github(
     settings: Settings = Depends(get_settings),
 ) -> dict[str, str]:
     raw_body = await request.body()
-
     if not _verify_github_signature(raw_body, x_hub_signature_256, settings.github_webhook_secret):
         raise HTTPException(status_code=403, detail="Invalid webhook signature")
-
     try:
         payload = WebhookGitHubPayload.model_validate(json.loads(raw_body))
     except Exception as e:
         raise HTTPException(status_code=422, detail=f"Invalid payload: {e}")
-
     if payload.action not in ("opened", "synchronize", "reopened"):
         return {"status": "ignored", "action": payload.action}
-
     pool = await get_pool()
-    job_id = await _create_job_record(
-        pool,
-        pr_url=payload.pr_url,
-        repo_name=payload.repo_name,
-        pr_number=payload.pr_number,
-        pr_title=payload.pr_title,
-    )
-    await _enqueue_job(
-        settings, job_id,
-        {"pr_url": payload.pr_url, "repo_name": payload.repo_name, "pr_number": payload.pr_number},
-    )
-    logger.info(f"Webhook accepted: job_id={job_id} pr={payload.pr_url}")
+    job_id = await _create_job_record(pool, payload.pr_url, payload.repo_name,
+                                       payload.pr_number, payload.pr_title)
+    await _enqueue_job(settings, job_id,
+                       {"pr_url": payload.pr_url, "repo_name": payload.repo_name,
+                        "pr_number": payload.pr_number})
+    logger.info(f"Webhook accepted: job_id={job_id}")
     return {"job_id": job_id, "status": "queued"}
 
 
 @app.post("/jobs", status_code=status.HTTP_201_CREATED)
-async def create_job(
-    body: JobCreate,
+async def create_job(body: JobCreate, settings: Settings = Depends(get_settings)) -> dict[str, str]:
+    pool = await get_pool()
+    job_id = await _create_job_record(pool, body.pr_url, body.repo_name,
+                                       body.pr_number, body.pr_title, body.diff_content)
+    await _enqueue_job(settings, job_id,
+                       {"pr_url": body.pr_url, "repo_name": body.repo_name,
+                        "pr_number": body.pr_number, "diff_content": body.diff_content})
+    return {"id": job_id, "status": "queued"}
+
+
+@app.post("/jobs/analyze", status_code=status.HTTP_201_CREATED)
+async def analyze_job(
+    body: AnalyzeJobRequest,
     settings: Settings = Depends(get_settings),
 ) -> dict[str, str]:
+    if not body.pr_url and not body.diff_content:
+        raise HTTPException(
+            status_code=422,
+            detail="Provide either pr_url or diff_content",
+        )
+    pr_number = body.pr_number or 0
+    pr_url = body.pr_url or f"https://github.com/{body.repo_name}/pull/{pr_number}"
     pool = await get_pool()
     job_id = await _create_job_record(
-        pool,
-        pr_url=body.pr_url,
-        repo_name=body.repo_name,
-        pr_number=body.pr_number,
-        pr_title=body.pr_title,
-        diff_content=body.diff_content,
+        pool, pr_url, body.repo_name, pr_number,
+        diff_content=body.diff_content, source="manual",
     )
-    await _enqueue_job(
-        settings, job_id,
-        {"pr_url": body.pr_url, "repo_name": body.repo_name,
-         "pr_number": body.pr_number, "diff_content": body.diff_content},
-    )
-    logger.info(f"Job created: job_id={job_id}")
-    return {"id": job_id, "status": "queued"}
+    await _enqueue_job(settings, job_id, {
+        "pr_url": pr_url,
+        "repo_name": body.repo_name,
+        "pr_number": pr_number,
+        "diff_content": body.diff_content,
+    })
+    logger.info(f"Manual analysis job created: {job_id}")
+    return {"job_id": job_id, "status": "queued"}
 
 
 @app.post("/jobs/test-run")
 async def test_run(body: JobCreate) -> dict[str, Any]:
-    """
-    Synchronous end-to-end pipeline run — bypasses SQS and webhook validation.
-    Use this to manually test the full agent pipeline against a real PR.
-    """
     pool = await get_pool()
-    job_id = await _create_job_record(
-        pool,
-        pr_url=body.pr_url,
-        repo_name=body.repo_name,
-        pr_number=body.pr_number,
-        pr_title=body.pr_title,
-        diff_content=body.diff_content,
-    )
-    logger.info(f"test-run: starting synchronous pipeline for job_id={job_id}")
-
+    job_id = await _create_job_record(pool, body.pr_url, body.repo_name,
+                                       body.pr_number, body.pr_title, body.diff_content)
     from backend.job_processor import process_job
     final_state = await process_job(job_id)
-
     job = await _fetch_job_with_traces(pool, job_id)
-
     return {
         "job_id": job_id,
         "status": job.get("status") if job else "unknown",
         "risk_level": final_state.get("risk_level"),
-        "risk_score": final_state.get("risk_score"),
-        "risk_reasons": final_state.get("risk_reasons", []),
         "tests_generated": len(final_state.get("generated_tests", [])),
-        "execution_results": [
-            {
-                "file_path": r.file_path,
-                "pass_count": r.pass_count,
-                "fail_count": r.fail_count,
-                "success": r.success,
-            }
-            for r in final_state.get("execution_results", [])
-        ],
         "repair_attempts": final_state.get("repair_attempts", 0),
         "final_summary": final_state.get("final_summary", ""),
         "errors": final_state.get("errors", []),
-        "agent_traces": job.get("traces", []) if job else [],
     }
+
+
+@app.post("/jobs/{job_id}/approve")
+async def approve_job(job_id: str) -> dict[str, Any]:
+    pool = await get_pool()
+    async with pool.acquire() as conn:
+        row = await conn.fetchrow("SELECT * FROM jobs WHERE id = $1::uuid", job_id)
+        if not row:
+            raise HTTPException(status_code=404, detail=f"Job {job_id} not found")
+        if row["status"] != "awaiting_review":
+            raise HTTPException(
+                status_code=409,
+                detail=f"Job is '{row['status']}', not 'awaiting_review'",
+            )
+        await conn.execute(
+            """
+            UPDATE jobs
+               SET human_approved = TRUE,
+                   human_reviewed_at = $2,
+                   status = 'completed',
+                   updated_at = NOW()
+             WHERE id = $1::uuid
+            """,
+            job_id,
+            datetime.now(timezone.utc),
+        )
+
+    from backend.job_processor import resume_job
+    await resume_job(job_id)
+    logger.info(f"Job {job_id} approved — n8n notified")
+    return {"job_id": job_id, "status": "completed", "human_approved": True}
+
+
+@app.post("/jobs/{job_id}/reject")
+async def reject_job(job_id: str) -> dict[str, Any]:
+    pool = await get_pool()
+    async with pool.acquire() as conn:
+        row = await conn.fetchrow("SELECT * FROM jobs WHERE id = $1::uuid", job_id)
+        if not row:
+            raise HTTPException(status_code=404, detail=f"Job {job_id} not found")
+        await conn.execute(
+            """
+            UPDATE jobs
+               SET human_approved = FALSE,
+                   human_reviewed_at = $2,
+                   status = 'rejected',
+                   updated_at = NOW()
+             WHERE id = $1::uuid
+            """,
+            job_id,
+            datetime.now(timezone.utc),
+        )
+    logger.info(f"Job {job_id} rejected")
+    return {"job_id": job_id, "status": "rejected", "human_approved": False}
 
 
 @app.get("/jobs/{job_id}", response_model=JobResponse)
@@ -296,7 +354,216 @@ async def list_jobs(
             page_size, offset,
         )
     items = [{**dict(row), "traces": [], "generated_tests": []} for row in rows]
-    return {"items": items, "total": total, "page": page, "page_size": page_size}
+    stats = await _compute_list_stats(pool)
+    return {"items": items, "total": total, "page": page, "page_size": page_size, "stats": stats}
+
+
+# ---------------------------------------------------------------------------
+# Routes — system control
+# ---------------------------------------------------------------------------
+
+@app.post("/system/pause")
+async def pause_system() -> dict[str, bool]:
+    from backend.job_processor import pause_consumer
+    pause_consumer()
+    return {"paused": True}
+
+
+@app.post("/system/resume")
+async def resume_system() -> dict[str, bool]:
+    from backend.job_processor import resume_consumer
+    resume_consumer()
+    return {"paused": False}
+
+
+@app.post("/system/stop")
+async def stop_system() -> dict[str, Any]:
+    from backend.job_processor import stop_consumer
+    stop_consumer()
+    return {"stopped": True, "paused": True}
+
+
+@app.post("/system/fetch-github")
+async def fetch_github(settings: Settings = Depends(get_settings)) -> dict[str, Any]:
+    """Trigger seeder to pull latest merged PRs from configured GitHub repos."""
+    import os
+    import httpx
+
+    token = os.getenv("GITHUB_TOKEN", "")
+    repos = os.getenv("GITHUB_REPOS", "fastapi/fastapi,pydantic/pydantic").split(",")
+    repos = [r.strip() for r in repos if r.strip()]
+    created: list[str] = []
+    pool = await get_pool()
+
+    async with httpx.AsyncClient(timeout=30.0) as client:
+        for repo in repos:
+            owner, name = (repo.split("/") + [""])[:2]
+            if not owner or not name:
+                continue
+            headers = {
+                "Accept": "application/vnd.github+json",
+                "X-GitHub-Api-Version": "2022-11-28",
+            }
+            if token:
+                headers["Authorization"] = f"Bearer {token}"
+            try:
+                resp = await client.get(
+                    f"https://api.github.com/repos/{owner}/{name}/pulls",
+                    headers=headers,
+                    params={"state": "closed", "sort": "updated", "direction": "desc", "per_page": 5},
+                )
+                resp.raise_for_status()
+                for pr in resp.json():
+                    if not pr.get("merged_at"):
+                        continue
+                    job_id = await _create_job_record(
+                        pool,
+                        pr["html_url"],
+                        repo,
+                        pr["number"],
+                        pr.get("title", ""),
+                        pr.get("body") or "",
+                        source="seeded",
+                    )
+                    await _enqueue_job(settings, job_id, {
+                        "pr_url": pr["html_url"],
+                        "repo_name": repo,
+                        "pr_number": pr["number"],
+                    })
+                    created.append(job_id)
+            except Exception as e:
+                logger.warning(f"GitHub fetch failed for {repo}: {e}")
+
+    logger.info(f"fetch-github: created {len(created)} jobs")
+    return {"jobs_created": len(created), "job_ids": created}
+
+
+@app.get("/system/status", response_model=SystemStatusResponse)
+async def system_status() -> dict[str, Any]:
+    from backend.job_processor import is_consumer_paused, is_consumer_stopped
+    pool = await get_pool()
+    async with pool.acquire() as conn:
+        active = await conn.fetchval(
+            "SELECT COUNT(*) FROM jobs WHERE status = 'processing'"
+        )
+        queued = await conn.fetchval(
+            "SELECT COUNT(*) FROM jobs WHERE status = 'queued'"
+        )
+        awaiting = await conn.fetchval(
+            "SELECT COUNT(*) FROM jobs WHERE status = 'awaiting_review'"
+        )
+    paused = is_consumer_paused()
+    stopped = is_consumer_stopped()
+    return {
+        "paused": paused,
+        "stopped": stopped,
+        "active": not paused and not stopped,
+        "active_jobs": active,
+        "queued_jobs": queued,
+        "awaiting_review": awaiting,
+    }
+
+
+# ---------------------------------------------------------------------------
+# Routes — analytics
+# ---------------------------------------------------------------------------
+
+@app.get("/analytics", response_model=AnalyticsResponse)
+async def analytics() -> dict[str, Any]:
+    pool = await get_pool()
+    async with pool.acquire() as conn:
+        pass_rate_rows = await conn.fetch(
+            """
+            SELECT
+                TO_CHAR(DATE_TRUNC('day', created_at), 'YYYY-MM-DD') AS date,
+                ROUND(
+                    AVG(CASE WHEN pass_count + fail_count > 0
+                             THEN pass_count::float / (pass_count + fail_count) * 100
+                        END)::numeric, 1
+                )::float AS pass_rate,
+                COUNT(*)::int AS total_jobs
+            FROM jobs
+            WHERE status IN ('completed', 'awaiting_review', 'rejected')
+              AND (pass_count + fail_count) > 0
+            GROUP BY DATE_TRUNC('day', created_at)
+            ORDER BY DATE_TRUNC('day', created_at)
+            LIMIT 30
+            """
+        )
+        risk_rows = await conn.fetch(
+            """
+            SELECT risk_level, COUNT(*)::int AS count
+            FROM jobs
+            WHERE risk_level IS NOT NULL
+            GROUP BY risk_level
+            ORDER BY count DESC
+            """
+        )
+        agent_rows = await conn.fetch(
+            """
+            SELECT
+                agent_name,
+                MAX(model_used) AS model_used,
+                AVG(latency_ms)::int AS avg_latency_ms,
+                COUNT(*)::int AS run_count
+            FROM agent_traces
+            WHERE latency_ms IS NOT NULL
+            GROUP BY agent_name
+            ORDER BY avg_latency_ms DESC
+            """
+        )
+        token_rows = await conn.fetch(
+            """
+            SELECT
+                j.id::text AS job_id,
+                TO_CHAR(j.created_at, 'YYYY-MM-DD') AS date,
+                COALESCE(SUM(
+                    CASE WHEN at.model_used LIKE '%haiku%'
+                         THEN COALESCE(at.input_tokens,0) + COALESCE(at.output_tokens,0)
+                    END
+                ), 0)::int AS haiku_tokens,
+                COALESCE(SUM(
+                    CASE WHEN at.model_used LIKE '%sonnet%'
+                         THEN COALESCE(at.input_tokens,0) + COALESCE(at.output_tokens,0)
+                    END
+                ), 0)::int AS sonnet_tokens
+            FROM jobs j
+            LEFT JOIN agent_traces at ON at.job_id = j.id
+            WHERE j.status IN ('completed', 'awaiting_review', 'rejected')
+            GROUP BY j.id, j.created_at
+            ORDER BY j.created_at DESC
+            LIMIT 20
+            """
+        )
+
+    return {
+        "pass_rate_over_time": [dict(r) for r in pass_rate_rows],
+        "risk_distribution": [dict(r) for r in risk_rows],
+        "agent_performance": [dict(r) for r in agent_rows],
+        "model_tokens_per_job": [dict(r) for r in token_rows],
+    }
+
+
+# ---------------------------------------------------------------------------
+# Routes — n8n + health
+# ---------------------------------------------------------------------------
+
+@app.post("/n8n/job-complete")
+async def n8n_job_complete(
+    body: dict[str, Any],
+    settings: Settings = Depends(get_settings),
+) -> dict[str, str]:
+    if not settings.n8n_webhook_url:
+        return {"status": "skipped"}
+    import httpx
+    try:
+        async with httpx.AsyncClient(timeout=10.0) as client:
+            resp = await client.post(settings.n8n_webhook_url, json=body)
+            resp.raise_for_status()
+        return {"status": "ok"}
+    except Exception as e:
+        logger.warning(f"n8n notification failed: {e}")
+        return {"status": "error", "detail": str(e)}
 
 
 @app.get("/health", response_model=HealthResponse)
@@ -309,5 +576,4 @@ async def health() -> dict[str, Any]:
         db_ok = True
     except Exception as e:
         logger.warning(f"DB health check failed: {e}")
-
-    return {"status": "ok" if db_ok else "degraded", "db_connected": db_ok, "version": "0.2.0"}
+    return {"status": "ok" if db_ok else "degraded", "db_connected": db_ok, "version": "0.3.0"}

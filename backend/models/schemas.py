@@ -54,10 +54,24 @@ class JobResponse(BaseModel):
     diff_content: str | None
     status: str
     risk_level: str | None
+    final_summary: str | None = None
+    tests_generated: int = 0
+    pass_count: int = 0
+    fail_count: int = 0
+    coverage_delta: float = 0.0
+    human_approved: bool | None = None
+    human_reviewed_at: datetime | None = None
+    source: str = "webhook"
     created_at: datetime
     updated_at: datetime
     traces: list[AgentTraceResponse] = Field(default_factory=list)
     generated_tests: list[GeneratedTestResponse] = Field(default_factory=list)
+
+
+class JobListStats(BaseModel):
+    total_tests_generated: int = 0
+    avg_pass_rate: float | None = None
+    avg_coverage_delta: float | None = None
 
 
 class JobListResponse(BaseModel):
@@ -65,12 +79,61 @@ class JobListResponse(BaseModel):
     total: int
     page: int
     page_size: int
+    stats: JobListStats = Field(default_factory=JobListStats)
 
 
 class HealthResponse(BaseModel):
     status: Literal["ok", "degraded"]
     db_connected: bool
     version: str = "0.1.0"
+
+
+class SystemStatusResponse(BaseModel):
+    paused: bool
+    stopped: bool = False
+    active: bool = True
+    active_jobs: int
+    queued_jobs: int
+    awaiting_review: int
+
+
+class AnalyticsPassRatePoint(BaseModel):
+    date: str
+    pass_rate: float
+    total_jobs: int
+
+
+class AnalyticsAgentPerf(BaseModel):
+    agent_name: str
+    model_used: str
+    avg_latency_ms: int
+    run_count: int
+
+
+class AnalyticsModelTokens(BaseModel):
+    job_id: str
+    date: str
+    haiku_tokens: int
+    sonnet_tokens: int
+
+
+class AnalyticsRiskItem(BaseModel):
+    risk_level: str
+    count: int
+
+
+class AnalyticsResponse(BaseModel):
+    pass_rate_over_time: list[AnalyticsPassRatePoint]
+    risk_distribution: list[AnalyticsRiskItem]
+    agent_performance: list[AnalyticsAgentPerf]
+    model_tokens_per_job: list[AnalyticsModelTokens]
+
+
+class AnalyzeJobRequest(BaseModel):
+    pr_url: str | None = None
+    diff_content: str | None = None
+    repo_name: str
+    pr_number: int | None = None
 
 
 class WebhookGitHubPayload(BaseModel):

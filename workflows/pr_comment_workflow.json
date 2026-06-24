@@ -1,0 +1,104 @@
+{
+  "name": "TestPilot PR Comment",
+  "nodes": [
+    {
+      "parameters": {
+        "httpMethod": "POST",
+        "path": "testpilot",
+        "responseMode": "onReceived",
+        "options": {}
+      },
+      "id": "a1b2c3d4-0001-0001-0001-000000000001",
+      "name": "Job Complete Webhook",
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 1,
+      "position": [240, 300],
+      "webhookId": "testpilot-job-complete"
+    },
+    {
+      "parameters": {
+        "url": "=http://api:8000/jobs/{{ $json.body.job_id }}",
+        "authentication": "none",
+        "method": "GET",
+        "options": {}
+      },
+      "id": "a1b2c3d4-0001-0001-0001-000000000002",
+      "name": "Get Job Details",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4,
+      "position": [460, 300]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "string": [
+            {
+              "value1": "={{ $json.status }}",
+              "operation": "equals",
+              "value2": "completed"
+            }
+          ]
+        }
+      },
+      "id": "a1b2c3d4-0001-0001-0001-000000000003",
+      "name": "Job Completed?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 1,
+      "position": [680, 300]
+    },
+    {
+      "parameters": {
+        "resource": "issue",
+        "operation": "createComment",
+        "owner": "={{ $('Job Complete Webhook').item.json.body.repo_name.split('/')[0] }}",
+        "repository": "={{ $('Job Complete Webhook').item.json.body.repo_name.split('/')[1] }}",
+        "issueNumber": "={{ $('Job Complete Webhook').item.json.body.pr_number }}",
+        "body": "={{ $('Get Job Details').item.json.final_summary }}"
+      },
+      "id": "a1b2c3d4-0001-0001-0001-000000000004",
+      "name": "Post PR Comment",
+      "type": "n8n-nodes-base.github",
+      "typeVersion": 1,
+      "position": [900, 220],
+      "credentials": {
+        "githubApi": {
+          "id": "github-cred-id",
+          "name": "GitHub API"
+        }
+      }
+    },
+    {
+      "parameters": {},
+      "id": "a1b2c3d4-0001-0001-0001-000000000005",
+      "name": "No-op (not completed)",
+      "type": "n8n-nodes-base.noOp",
+      "typeVersion": 1,
+      "position": [900, 400]
+    }
+  ],
+  "connections": {
+    "Job Complete Webhook": {
+      "main": [
+        [{ "node": "Get Job Details", "type": "main", "index": 0 }]
+      ]
+    },
+    "Get Job Details": {
+      "main": [
+        [{ "node": "Job Completed?", "type": "main", "index": 0 }]
+      ]
+    },
+    "Job Completed?": {
+      "main": [
+        [{ "node": "Post PR Comment", "type": "main", "index": 0 }],
+        [{ "node": "No-op (not completed)", "type": "main", "index": 0 }]
+      ]
+    }
+  },
+  "active": false,
+  "settings": {
+    "executionOrder": "v1"
+  },
+  "meta": {
+    "instanceId": "testpilot-local"
+  }
+}

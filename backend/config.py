@@ -41,6 +41,9 @@ class Settings(BaseSettings):
     # S3
     s3_bucket_name: str = "testpilot-artifacts"
 
+    # n8n
+    n8n_webhook_url: str = ""  # e.g. http://n8n:5678/webhook/testpilot
+
     # App
     app_env: Literal["development", "staging", "production"] = "development"
     log_level: str = "INFO"
