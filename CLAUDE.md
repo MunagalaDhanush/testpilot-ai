@@ -17,12 +17,12 @@ TestPilot AI is a multi-agent automated test generation platform. It analyzes Gi
 ## Model Routing (STRICT — do not deviate)
 | Agent | Model | Reason |
 |-------|-------|--------|
-| context_collector | claude-haiku-3-5 | structured extraction |
-| risk_classifier | claude-haiku-3-5 | categorical output |
-| test_strategist | claude-sonnet-4-5 | multi-step reasoning |
-| test_generator | claude-sonnet-4-5 | code quality |
-| failure_diagnoser | claude-sonnet-4-5 | log reasoning |
-| pr_summarizer | claude-haiku-3-5 | summarization |
+| context_collector | claude-haiku-4-5-20251001 | structured extraction |
+| risk_classifier | claude-haiku-4-5-20251001 | categorical output |
+| test_strategist | claude-sonnet-4-6 | multi-step reasoning |
+| test_generator | claude-sonnet-4-6 | code quality |
+| failure_diagnoser | claude-sonnet-4-6 | log reasoning |
+| pr_summarizer | claude-haiku-4-5-20251001 | summarization |
 
 ## Security Rules
 - All credentials in `.env`. Never hardcode any keys.

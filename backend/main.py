@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import hmac
 import json
@@ -24,26 +25,30 @@ from backend.models.schemas import (
 
 
 @asynccontextmanager
-async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
+async def lifespan(_app: FastAPI) -> AsyncGenerator[None, None]:
     settings = get_settings()
     logger.info(f"Starting TestPilot AI [{settings.app_env}]")
     await init_db(settings.database_url)
     _ensure_sqs_queue(settings)
+
+    # Start SQS consumer as a background task
+    from backend.job_processor import consume_jobs
+    consumer_task = asyncio.create_task(consume_jobs(), name="sqs-consumer")
+
     yield
+
+    consumer_task.cancel()
+    try:
+        await consumer_task
+    except asyncio.CancelledError:
+        pass
     await close_db()
     logger.info("TestPilot AI shut down")
 
 
 def _ensure_sqs_queue(settings: Settings) -> None:
     try:
-        kwargs: dict[str, Any] = {
-            "region_name": settings.aws_default_region,
-            "aws_access_key_id": settings.aws_access_key_id,
-            "aws_secret_access_key": settings.aws_secret_access_key,
-        }
-        if settings.aws_endpoint_url:
-            kwargs["endpoint_url"] = settings.aws_endpoint_url
-        sqs = boto3.client("sqs", **kwargs)
+        sqs = _get_sqs_client(settings)
         sqs.create_queue(QueueName=settings.sqs_queue_name)
         logger.info(f"SQS queue '{settings.sqs_queue_name}' ready")
     except Exception as e:
@@ -64,7 +69,7 @@ def _get_sqs_client(settings: Settings) -> Any:
 app = FastAPI(
     title="TestPilot AI",
     description="Multi-agent automated test generation platform",
-    version="0.1.0",
+    version="0.2.0",
     lifespan=lifespan,
 )
 
@@ -77,7 +82,13 @@ app.add_middleware(
 )
 
 
-def _verify_github_signature(payload: bytes, signature_header: str | None, secret: str) -> bool:
+# ---------------------------------------------------------------------------
+# Internal helpers
+# ---------------------------------------------------------------------------
+
+def _verify_github_signature(
+    payload: bytes, signature_header: str | None, secret: str
+) -> bool:
     if not signature_header:
         return False
     try:
@@ -102,15 +113,11 @@ async def _create_job_record(
     async with pool.acquire() as conn:
         await conn.execute(
             """
-            INSERT INTO jobs (id, pr_url, repo_name, pr_number, pr_title, diff_content, status)
+            INSERT INTO jobs
+                (id, pr_url, repo_name, pr_number, pr_title, diff_content, status)
             VALUES ($1::uuid, $2, $3, $4, $5, $6, 'queued')
             """,
-            job_id,
-            pr_url,
-            repo_name,
-            pr_number,
-            pr_title,
-            diff_content,
+            job_id, pr_url, repo_name, pr_number, pr_title, diff_content,
         )
     return job_id
 
@@ -128,19 +135,15 @@ async def _enqueue_job(settings: Settings, job_id: str, payload: dict[str, Any])
 
 async def _fetch_job_with_traces(pool: Any, job_id: str) -> dict[str, Any] | None:
     async with pool.acquire() as conn:
-        row = await conn.fetchrow(
-            "SELECT * FROM jobs WHERE id = $1::uuid", job_id
-        )
+        row = await conn.fetchrow("SELECT * FROM jobs WHERE id = $1::uuid", job_id)
         if not row:
             return None
-
         traces = await conn.fetch(
             "SELECT * FROM agent_traces WHERE job_id = $1::uuid ORDER BY created_at", job_id
         )
         tests = await conn.fetch(
             "SELECT * FROM generated_tests WHERE job_id = $1::uuid ORDER BY created_at", job_id
         )
-
     job = dict(row)
     job["traces"] = [dict(t) for t in traces]
     job["generated_tests"] = [dict(t) for t in tests]
@@ -178,13 +181,10 @@ async def webhook_github(
         pr_number=payload.pr_number,
         pr_title=payload.pr_title,
     )
-
     await _enqueue_job(
-        settings,
-        job_id,
+        settings, job_id,
         {"pr_url": payload.pr_url, "repo_name": payload.repo_name, "pr_number": payload.pr_number},
     )
-
     logger.info(f"Webhook accepted: job_id={job_id} pr={payload.pr_url}")
     return {"job_id": job_id, "status": "queued"}
 
@@ -203,20 +203,58 @@ async def create_job(
         pr_title=body.pr_title,
         diff_content=body.diff_content,
     )
-
     await _enqueue_job(
-        settings,
-        job_id,
-        {
-            "pr_url": body.pr_url,
-            "repo_name": body.repo_name,
-            "pr_number": body.pr_number,
-            "diff_content": body.diff_content,
-        },
+        settings, job_id,
+        {"pr_url": body.pr_url, "repo_name": body.repo_name,
+         "pr_number": body.pr_number, "diff_content": body.diff_content},
     )
-
-    logger.info(f"Job created directly: job_id={job_id}")
+    logger.info(f"Job created: job_id={job_id}")
     return {"id": job_id, "status": "queued"}
+
+
+@app.post("/jobs/test-run")
+async def test_run(body: JobCreate) -> dict[str, Any]:
+    """
+    Synchronous end-to-end pipeline run — bypasses SQS and webhook validation.
+    Use this to manually test the full agent pipeline against a real PR.
+    """
+    pool = await get_pool()
+    job_id = await _create_job_record(
+        pool,
+        pr_url=body.pr_url,
+        repo_name=body.repo_name,
+        pr_number=body.pr_number,
+        pr_title=body.pr_title,
+        diff_content=body.diff_content,
+    )
+    logger.info(f"test-run: starting synchronous pipeline for job_id={job_id}")
+
+    from backend.job_processor import process_job
+    final_state = await process_job(job_id)
+
+    job = await _fetch_job_with_traces(pool, job_id)
+
+    return {
+        "job_id": job_id,
+        "status": job.get("status") if job else "unknown",
+        "risk_level": final_state.get("risk_level"),
+        "risk_score": final_state.get("risk_score"),
+        "risk_reasons": final_state.get("risk_reasons", []),
+        "tests_generated": len(final_state.get("generated_tests", [])),
+        "execution_results": [
+            {
+                "file_path": r.file_path,
+                "pass_count": r.pass_count,
+                "fail_count": r.fail_count,
+                "success": r.success,
+            }
+            for r in final_state.get("execution_results", [])
+        ],
+        "repair_attempts": final_state.get("repair_attempts", 0),
+        "final_summary": final_state.get("final_summary", ""),
+        "errors": final_state.get("errors", []),
+        "agent_traces": job.get("traces", []) if job else [],
+    }
 
 
 @app.get("/jobs/{job_id}", response_model=JobResponse)
@@ -235,22 +273,13 @@ async def list_jobs(
 ) -> dict[str, Any]:
     pool = await get_pool()
     offset = (page - 1) * page_size
-
     async with pool.acquire() as conn:
         total = await conn.fetchval("SELECT COUNT(*) FROM jobs")
         rows = await conn.fetch(
             "SELECT * FROM jobs ORDER BY created_at DESC LIMIT $1 OFFSET $2",
-            page_size,
-            offset,
+            page_size, offset,
         )
-
-    items = []
-    for row in rows:
-        job = dict(row)
-        job["traces"] = []
-        job["generated_tests"] = []
-        items.append(job)
-
+    items = [{**dict(row), "traces": [], "generated_tests": []} for row in rows]
     return {"items": items, "total": total, "page": page, "page_size": page_size}
 
 
@@ -265,8 +294,4 @@ async def health() -> dict[str, Any]:
     except Exception as e:
         logger.warning(f"DB health check failed: {e}")
 
-    return {
-        "status": "ok" if db_ok else "degraded",
-        "db_connected": db_ok,
-        "version": "0.1.0",
-    }
+    return {"status": "ok" if db_ok else "degraded", "db_connected": db_ok, "version": "0.2.0"}

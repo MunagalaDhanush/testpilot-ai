@@ -9,45 +9,59 @@ from backend.agents.base_agent import BaseAgent
 from backend.graph.state import PipelineState
 from backend.models.schemas import GeneratedTest
 
-MODEL = "claude-sonnet-4-5"
+MODEL = "claude-sonnet-4-6"
 
-SYSTEM_PROMPT = """You are an expert test engineer. Generate complete, runnable Python pytest test files.
+SYSTEM_PROMPT = """\
+You are an expert test engineer. Generate complete, immediately runnable Python pytest test files.
+
 Rules:
-- Write complete, self-contained test files with all imports
-- Use pytest and pytest-asyncio for async tests
-- Mock external dependencies with unittest.mock or pytest-mock
-- Include docstrings explaining each test's intent
-- Do NOT use placeholder comments like "add logic here"
-- Return ONLY valid JSON with this shape:
+- Every test file must be self-contained with all imports at the top
+- Use pytest fixtures for setup/teardown; use @pytest.mark.asyncio for async tests
+- Mock ALL external dependencies (DB, HTTP, file I/O) using unittest.mock.patch or pytest-mock
+- Test names must be descriptive: test_<function>_<scenario>
+- Cover every scenario in the test_cases list: positive, negative, and edge cases
+- Do NOT write placeholder comments — every test must have a real assertion
+- Generated tests should work with `pytest <file> -v` without any extra setup
+
+Return ONLY valid JSON — no markdown fences:
 {
   "tests": [
     {
-      "file_path": "tests/test_pool.py",
+      "file_path": "tests/test_connection_pool.py",
       "test_type": "unit",
-      "content": "import pytest\\n\\ndef test_something():\\n    pass"
+      "functions_covered": ["ConnectionPool.release", "ConnectionPool.close_all"],
+      "content": "import pytest\\nfrom unittest.mock import MagicMock, patch\\n\\n..."
     }
   ]
-}"""
+}\
+"""
 
 
 class TestGeneratorAgent(BaseAgent):
-    def __init__(self) -> None:
-        super().__init__(model_name=MODEL, agent_name="test_generator")
+    def __init__(self, test_type: str = "unit") -> None:
+        super().__init__(model_name=MODEL, agent_name=f"test_generator_{test_type}")
+        self._test_type = test_type
 
-    async def _execute(self, state: PipelineState) -> PipelineState:
+    async def _execute(
+        self, state: PipelineState
+    ) -> tuple[PipelineState, int, int]:
         diff = state.get("diff_content", "")
         strategy = state.get("test_strategy", {})
-        changed_files = state.get("changed_files", [])
         risk_level = state.get("risk_level", "medium")
 
-        test_cases = strategy.get("test_cases", [])
-        test_types = strategy.get("test_types", ["unit"])
+        # Only pick test cases that match our assigned type
+        all_cases = strategy.get("test_cases", [])
+        my_cases = [c for c in all_cases if c.get("test_type") == self._test_type]
+
+        if not my_cases:
+            logger.info(f"test_generator_{self._test_type}: no cases assigned, skipping")
+            return {**state, "generated_tests": []}, 0, 0
 
         context = (
             f"Risk level: {risk_level}\n"
-            f"Test types to generate: {', '.join(test_types)}\n"
-            f"Test cases to implement:\n{json.dumps(test_cases, indent=2)}\n\n"
-            f"PR diff:\n{diff[:10000]}"
+            f"Test type to generate: {self._test_type}\n"
+            f"Test cases:\n{json.dumps(my_cases, indent=2)}\n\n"
+            f"PR diff (source context, first 10000 chars):\n{diff[:10000]}"
         )
 
         text, input_tokens, output_tokens = await self._call_llm(
@@ -58,37 +72,33 @@ class TestGeneratorAgent(BaseAgent):
 
         generated: list[GeneratedTest] = []
         try:
-            parsed = json.loads(text)
+            clean = re.sub(r"^```(?:json)?\s*|\s*```$", "", text.strip())
+            parsed = json.loads(clean)
             for t in parsed.get("tests", []):
-                generated.append(
-                    GeneratedTest(
-                        file_path=t["file_path"],
-                        test_type=t.get("test_type", "unit"),
-                        file_content=t["content"],
-                    )
-                )
+                generated.append(GeneratedTest(
+                    file_path=t["file_path"],
+                    test_type=t.get("test_type", self._test_type),
+                    file_content=t["content"],
+                ))
         except (json.JSONDecodeError, KeyError) as e:
-            logger.warning(f"Test generator JSON parse failed ({e}); attempting code extraction")
-            code_blocks = re.findall(r"```(?:python)?\n(.*?)```", text, re.DOTALL)
-            for i, block in enumerate(code_blocks):
-                generated.append(
-                    GeneratedTest(
-                        file_path=f"tests/test_generated_{i}.py",
-                        test_type="unit",
-                        file_content=block.strip(),
-                    )
-                )
+            logger.warning(f"test_generator_{self._test_type}: JSON parse failed ({e}), "
+                           "falling back to code-block extraction")
+            for i, block in enumerate(re.findall(r"```(?:python)?\n(.*?)```", text, re.DOTALL)):
+                generated.append(GeneratedTest(
+                    file_path=f"tests/test_{self._test_type}_generated_{i}.py",
+                    test_type=self._test_type,
+                    file_content=block.strip(),
+                ))
 
         if not generated:
-            logger.error("Test generator produced no tests")
-            errors = list(state.get("errors") or [])
-            errors.append("test_generator: no tests produced")
-            return {**state, "generated_tests": [], "errors": errors}
+            logger.error(f"test_generator_{self._test_type}: produced no tests")
+            return (
+                {**state, "generated_tests": [], "errors": [f"test_generator_{self._test_type}: no tests produced"]},
+                input_tokens,
+                output_tokens,
+            )
 
-        logger.info(f"Generated {len(generated)} test file(s)")
-        return {
-            **state,
-            "generated_tests": generated,
-            "_last_input_tokens": input_tokens,
-            "_last_output_tokens": output_tokens,
-        }
+        logger.info(f"test_generator_{self._test_type}: generated {len(generated)} file(s)")
+        # The state reducer (operator.add) merges this with outputs from the
+        # other parallel generator nodes
+        return {**state, "generated_tests": generated}, input_tokens, output_tokens
