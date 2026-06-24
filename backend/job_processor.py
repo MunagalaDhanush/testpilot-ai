@@ -52,6 +52,25 @@ def is_consumer_stopped() -> bool:
     return _consumer_stopped
 
 
+_consumer_task: asyncio.Task | None = None
+
+
+def set_consumer_task(task: asyncio.Task) -> None:
+    global _consumer_task
+    _consumer_task = task
+
+
+async def restart_consumer() -> None:
+    global _consumer_stopped, _consumer_task
+    _consumer_stopped = False
+    _consumer_active.set()
+    if _consumer_task is None or _consumer_task.done():
+        _consumer_task = asyncio.create_task(consume_jobs(), name="sqs-consumer")
+        logger.info("SQS consumer restarted — new task created")
+    else:
+        logger.info("SQS consumer restart: flags reset, existing task still running")
+
+
 # ---------------------------------------------------------------------------
 # Core job processor
 # ---------------------------------------------------------------------------

@@ -101,4 +101,11 @@ async def create_tables() -> None:
             )
         """)
 
+        await conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_jobs_created_at ON jobs(created_at DESC)"
+        )
+        await conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_agent_traces_job_id ON agent_traces(job_id)"
+        )
+
     logger.info("Database tables ready.")

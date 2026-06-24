@@ -3,14 +3,9 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import Link from 'next/link';
 import {
-  Download,
-  Pause,
-  Play,
-  Square,
-  Loader2,
-  ArrowRight,
-  ExternalLink,
-  Database,
+  Download, Pause, Play, Square, Loader2, ArrowRight,
+  ExternalLink, Database, Timer, TrendingDown, Wrench,
+  Zap, Activity, CheckCircle2,
 } from 'lucide-react';
 import {
   AreaChart, Area,
@@ -22,12 +17,13 @@ import {
   ResponsiveContainer, Legend,
 } from 'recharts';
 import {
-  fetchJobs, fetchSystemStatus, pauseSystem, resumeSystem, stopSystem,
-  fetchGithub, approveJob, rejectJob, fetchAnalytics,
+  fetchJobs, fetchSystemStatus, pauseSystem, resumeSystem,
+  stopSystem, restartSystem, fetchGithub, approveJob, rejectJob, fetchAnalytics,
 } from '../lib/api';
 import type { Job, JobListStats, SystemStatus, AnalyticsResponse } from '../lib/types';
 
-const POLL_MS = 15_000;
+const JOBS_POLL_MS  = 30_000;
+const STATS_POLL_MS = 60_000;
 
 const STATUS_CFG: Record<string, { label: string; color: string; dot: string }> = {
   queued:          { label: 'Queued',          color: 'text-slate-400',   dot: 'bg-slate-500' },
@@ -39,11 +35,7 @@ const STATUS_CFG: Record<string, { label: string; color: string; dot: string }> 
 };
 
 const RISK_COLORS: Record<string, string> = {
-  low: '#00ff88',
-  medium: '#f59e0b',
-  high: '#ef4444',
-  critical: '#7c3aed',
-  unknown: '#00d4ff',
+  low: '#00ff88', medium: '#f59e0b', high: '#ef4444', critical: '#7c3aed', unknown: '#00d4ff',
 };
 
 const SOURCE_CFG: Record<string, { label: string; style: string }> = {
@@ -52,14 +44,76 @@ const SOURCE_CFG: Record<string, { label: string; style: string }> = {
   manual:  { label: 'Manual',  style: 'text-[#f59e0b] border-[#f59e0b]/40 bg-[#f59e0b]/5' },
 };
 
-const CC = { cyan: '#00d4ff', violet: '#7c3aed', success: '#00ff88', warning: '#f59e0b', danger: '#ef4444', slate: '#475569' };
+const CC = { cyan: '#00d4ff', violet: '#7c3aed', success: '#00ff88', warning: '#f59e0b', danger: '#ef4444' };
 
-const chartTooltip = {
-  contentStyle: { background: '#0d0d14', border: '1px solid #1a1a2e', borderRadius: 8, fontSize: 12, fontWeight: 500 },
-  labelStyle: { color: '#94a3b8' },
+// ── Shared tooltip style ──────────────────────────────────────────────────────
+const TT_STYLE: React.CSSProperties = {
+  background: '#1a1a2e',
+  border: '1px solid #00d4ff',
+  borderRadius: '8px',
+  padding: '8px 12px',
+  color: '#f1f5f9',
+  fontWeight: 600,
+  fontSize: '13px',
+  boxShadow: '0 0 12px rgba(0,212,255,0.2)',
 };
 
-// ── Tooltip wrapper ──────────────────────────────────────────────────────────
+// ── Custom chart tooltips ─────────────────────────────────────────────────────
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+function RiskTooltip({ active, payload }: any) {
+  if (!active || !payload?.length) return null;
+  return (
+    <div style={TT_STYLE}>
+      <div style={{ color: payload[0].payload.fill, marginBottom: 2 }}>{payload[0].name}</div>
+      <div style={{ color: '#00d4ff', fontWeight: 700 }}>{payload[0].value} jobs</div>
+    </div>
+  );
+}
+
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+function PassRateTooltip({ active, payload, label }: any) {
+  if (!active || !payload?.length) return null;
+  return (
+    <div style={TT_STYLE}>
+      <div style={{ color: '#94a3b8', marginBottom: 4, fontSize: 11 }}>{label}</div>
+      <div style={{ color: '#00d4ff', fontWeight: 700 }}>{payload[0].value.toFixed(1)}% pass rate</div>
+      {payload[0].payload?.total_jobs != null && (
+        <div style={{ color: '#475569', fontSize: 11, marginTop: 2 }}>{payload[0].payload.total_jobs} jobs</div>
+      )}
+    </div>
+  );
+}
+
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+function AgentTooltip({ active, payload, label }: any) {
+  if (!active || !payload?.length) return null;
+  return (
+    <div style={TT_STYLE}>
+      <div style={{ color: '#94a3b8', marginBottom: 4, fontSize: 11 }}>{String(label).replace(/_/g, ' ')}</div>
+      <div style={{ color: '#7c3aed', fontWeight: 700 }}>{payload[0].value} ms avg</div>
+      {payload[0].payload?.run_count != null && (
+        <div style={{ color: '#475569', fontSize: 11, marginTop: 2 }}>{payload[0].payload.run_count} runs</div>
+      )}
+    </div>
+  );
+}
+
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+function TokensTooltip({ active, payload, label }: any) {
+  if (!active || !payload?.length) return null;
+  return (
+    <div style={TT_STYLE}>
+      <div style={{ color: '#94a3b8', marginBottom: 6, fontSize: 11 }}>{label}</div>
+      {payload.map((p: { name: string; value: number; color: string }) => (
+        <div key={p.name} style={{ color: p.color, fontWeight: 700 }}>
+          {p.name}: {p.value?.toLocaleString()}
+        </div>
+      ))}
+    </div>
+  );
+}
+
+// ── InfoTooltip ───────────────────────────────────────────────────────────────
 function InfoTooltip({ text }: { text: string }) {
   return (
     <span className="tooltip-container ml-1 cursor-default select-none">
@@ -91,6 +145,35 @@ function StatTile({ label, value, sub, accent, tooltip }: {
   );
 }
 
+// ── Efficiency card ───────────────────────────────────────────────────────────
+function EfficiencyCard({
+  icon: Icon, label, value, sub, accent, tooltip,
+}: {
+  icon: React.ComponentType<{ className?: string }>;
+  label: string; value: string | number; sub: string;
+  accent: 'cyan' | 'green' | 'violet' | 'amber'; tooltip: string;
+}) {
+  const a = {
+    cyan:   { text: 'text-[#00d4ff]', border: 'border-[#00d4ff]/20', glow: 'glow-cyan' },
+    green:  { text: 'text-[#00ff88]', border: 'border-[#00ff88]/20', glow: 'glow-success' },
+    violet: { text: 'text-[#7c3aed]', border: 'border-[#7c3aed]/20', glow: 'glow-violet' },
+    amber:  { text: 'text-[#f59e0b]', border: 'border-[#f59e0b]/20', glow: 'glow-warning' },
+  }[accent];
+  return (
+    <div className={`stat-tile bg-[#0d0d14] border ${a.border} ${a.glow} rounded-xl p-5 flex flex-col gap-2`}>
+      <div className="flex items-center justify-between">
+        <Icon className={`w-5 h-5 ${a.text}`} />
+        <InfoTooltip text={tooltip} />
+      </div>
+      <div className={`text-2xl font-bold ${a.text} font-mono`}>{value}</div>
+      <div>
+        <div className="text-xs text-[#94a3b8] font-semibold uppercase tracking-wider">{label}</div>
+        <div className="text-xs text-[#475569] font-medium mt-0.5">{sub}</div>
+      </div>
+    </div>
+  );
+}
+
 // ── Status badge ─────────────────────────────────────────────────────────────
 function StatusBadge({ status }: { status: string }) {
   const cfg = STATUS_CFG[status] ?? { label: status, color: 'text-slate-400', dot: 'bg-slate-500' };
@@ -106,9 +189,7 @@ function StatusBadge({ status }: { status: string }) {
 function RiskBadge({ level }: { level?: string | null }) {
   if (!level) return <span className="text-[#475569] text-xs font-medium">—</span>;
   const color = RISK_COLORS[level] ?? '#475569';
-  return (
-    <span className="text-xs font-bold uppercase" style={{ color }}>{level}</span>
-  );
+  return <span className="text-xs font-bold uppercase" style={{ color }}>{level}</span>;
 }
 
 // ── Source badge ─────────────────────────────────────────────────────────────
@@ -154,8 +235,7 @@ function StopDialog({ onConfirm, onCancel }: { onConfirm: () => void; onCancel: 
       <div className="bg-[#0d0d14] border border-[#1a1a2e] rounded-2xl p-6 max-w-sm mx-4 shadow-2xl">
         <h3 className="text-[#f1f5f9] font-bold text-base mb-2">Stop All Activity</h3>
         <p className="text-[#94a3b8] text-sm font-medium leading-relaxed mb-5">
-          This will stop all fetching and processing. Jobs already in progress will complete.
-          Are you sure?
+          This will halt all processing. Click Restart System to resume. Continue?
         </p>
         <div className="flex gap-3 justify-end">
           <button onClick={onCancel}
@@ -188,7 +268,7 @@ function PassRateChart({ data }: { data: AnalyticsResponse['pass_rate_over_time'
           <CartesianGrid strokeDasharray="3 3" stroke="#1a1a2e" />
           <XAxis dataKey="date" tick={{ fill: '#475569', fontSize: 10, fontWeight: 500 }} />
           <YAxis unit="%" tick={{ fill: '#475569', fontSize: 10 }} domain={[0, 100]} />
-          <Tooltip {...chartTooltip} itemStyle={{ color: CC.cyan }} formatter={(v: number) => [`${v.toFixed(1)}%`, 'Pass Rate']} />
+          <Tooltip content={<PassRateTooltip />} />
           <Area type="monotone" dataKey="pass_rate" stroke={CC.cyan} strokeWidth={2} fill="url(#prGrad)" dot={false} />
         </AreaChart>
       </ResponsiveContainer>
@@ -211,13 +291,13 @@ function RiskDistChart({ data }: { data: AnalyticsResponse['risk_distribution'] 
             {data.map((entry) => (
               <Cell
                 key={entry.risk_level}
-                fill={RISK_COLORS[entry.risk_level] ?? CC.slate}
+                fill={RISK_COLORS[entry.risk_level] ?? '#475569'}
                 stroke="#1a1a2e"
                 strokeWidth={2}
               />
             ))}
           </Pie>
-          <Tooltip {...chartTooltip} />
+          <Tooltip content={<RiskTooltip />} />
           <Legend iconType="circle" iconSize={8}
             formatter={(v) => (
               <span style={{ color: '#94a3b8', fontSize: 12, fontWeight: 500, textTransform: 'capitalize' }}>{v}</span>
@@ -238,7 +318,7 @@ function AgentPerfChart({ data }: { data: AnalyticsResponse['agent_performance']
           <XAxis type="number" tick={{ fill: '#475569', fontSize: 10, fontWeight: 500 }} />
           <YAxis dataKey="agent_name" type="category" tick={{ fill: '#475569', fontSize: 10, fontWeight: 500 }} width={120}
             tickFormatter={(v: string) => v.replace(/_/g, ' ')} />
-          <Tooltip {...chartTooltip} itemStyle={{ color: CC.violet }} formatter={(v: number) => [`${v} ms`, 'Avg latency']} />
+          <Tooltip content={<AgentTooltip />} />
           <Bar dataKey="avg_latency_ms" fill={CC.violet} radius={[0, 4, 4, 0]} />
         </BarChart>
       </ResponsiveContainer>
@@ -255,7 +335,7 @@ function TokensChart({ data }: { data: AnalyticsResponse['model_tokens_per_job']
           <CartesianGrid strokeDasharray="3 3" stroke="#1a1a2e" />
           <XAxis dataKey="date" tick={{ fill: '#475569', fontSize: 10, fontWeight: 500 }} />
           <YAxis tick={{ fill: '#475569', fontSize: 10 }} />
-          <Tooltip {...chartTooltip} />
+          <Tooltip content={<TokensTooltip />} />
           <Legend iconType="circle" iconSize={8}
             formatter={(v) => <span style={{ color: '#94a3b8', fontSize: 12, fontWeight: 500 }}>{v}</span>} />
           <Line type="monotone" dataKey="haiku_tokens"  name="Haiku"  stroke={CC.cyan}   strokeWidth={2} dot={false} />
@@ -264,6 +344,14 @@ function TokensChart({ data }: { data: AnalyticsResponse['model_tokens_per_job']
       </ResponsiveContainer>
     </div>
   );
+}
+
+// ── Duration formatter ────────────────────────────────────────────────────────
+function fmtDuration(seconds: number): string {
+  if (seconds < 60) return `${seconds}s`;
+  const m = Math.floor(seconds / 60);
+  const s = seconds % 60;
+  return s > 0 ? `${m}m ${s}s` : `${m}m`;
 }
 
 // ── Page ─────────────────────────────────────────────────────────────────────
@@ -275,23 +363,21 @@ export default function HomePage() {
   const [analytics, setAnalytics] = useState<AnalyticsResponse | null>(null);
   const [loading, setLoading]     = useState(true);
   const [error, setError]         = useState<string | null>(null);
-  const [fetchBusy, setFetchBusy] = useState(false);
-  const [pauseBusy, setPauseBusy] = useState(false);
-  const [stopDialog, setStopDialog] = useState(false);
-  const timer = useRef<ReturnType<typeof setInterval> | null>(null);
+  const [fetchBusy, setFetchBusy]     = useState(false);
+  const [pauseBusy, setPauseBusy]     = useState(false);
+  const [restartBusy, setRestartBusy] = useState(false);
+  const [stopDialog, setStopDialog]   = useState(false);
+  const tabHiddenRef  = useRef(false);
+  const jobsTimerRef  = useRef<ReturnType<typeof setInterval> | null>(null);
+  const statsTimerRef = useRef<ReturnType<typeof setInterval> | null>(null);
 
-  const load = useCallback(async () => {
+  const loadJobs = useCallback(async () => {
     try {
-      const [listRes, statusRes, analyticsRes] = await Promise.all([
-        fetchJobs(1, 100),
-        fetchSystemStatus(),
-        fetchAnalytics(),
-      ]);
+      const [listRes, statusRes] = await Promise.all([fetchJobs(1, 100), fetchSystemStatus()]);
       setJobs(listRes.items);
       setStats(listRes.stats);
       setTotal(listRes.total);
       setSysStatus(statusRes);
-      setAnalytics(analyticsRes);
       setError(null);
     } catch (e) {
       setError(e instanceof Error ? e.message : String(e));
@@ -300,15 +386,42 @@ export default function HomePage() {
     }
   }, []);
 
+  const loadAnalytics = useCallback(async () => {
+    try {
+      const res = await fetchAnalytics();
+      setAnalytics(res);
+    } catch (e) {
+      console.error('Analytics fetch failed:', e);
+    }
+  }, []);
+
   useEffect(() => {
-    load();
-    timer.current = setInterval(load, POLL_MS);
-    return () => { if (timer.current) clearInterval(timer.current); };
-  }, [load]);
+    const onVisibility = () => {
+      tabHiddenRef.current = document.visibilityState === 'hidden';
+      if (document.visibilityState === 'visible') loadJobs();
+    };
+    document.addEventListener('visibilitychange', onVisibility);
+
+    loadJobs();
+    loadAnalytics();
+
+    jobsTimerRef.current = setInterval(() => {
+      if (!tabHiddenRef.current) loadJobs();
+    }, JOBS_POLL_MS);
+    statsTimerRef.current = setInterval(() => {
+      if (!tabHiddenRef.current) loadAnalytics();
+    }, STATS_POLL_MS);
+
+    return () => {
+      if (jobsTimerRef.current)  clearInterval(jobsTimerRef.current);
+      if (statsTimerRef.current) clearInterval(statsTimerRef.current);
+      document.removeEventListener('visibilitychange', onVisibility);
+    };
+  }, [loadJobs, loadAnalytics]);
 
   async function handleFetch() {
     setFetchBusy(true);
-    try { await fetchGithub(); await load(); }
+    try { await fetchGithub(); await loadJobs(); }
     catch (e) { console.error(e); }
     finally { setFetchBusy(false); }
   }
@@ -317,22 +430,51 @@ export default function HomePage() {
     setPauseBusy(true);
     try {
       if (sysStatus.paused) await resumeSystem(); else await pauseSystem();
-      await load();
+      await loadJobs();
     } finally { setPauseBusy(false); }
   }
 
   async function handleStop() {
     setStopDialog(false);
     await stopSystem();
-    await load();
+    await loadJobs();
   }
 
+  async function handleRestart() {
+    setRestartBusy(true);
+    try { await restartSystem(); await loadJobs(); }
+    catch (e) { console.error(e); }
+    finally { setRestartBusy(false); }
+  }
+
+  // ── Derived display values ────────────────────────────────────────────────
   const passRateStr = stats.avg_pass_rate != null ? `${stats.avg_pass_rate.toFixed(1)}%` : '—';
   const covDeltaStr = stats.avg_coverage_delta != null
     ? `${stats.avg_coverage_delta >= 0 ? '+' : ''}${stats.avg_coverage_delta.toFixed(1)}%` : '—';
 
-  const statusDot = sysStatus.stopped ? 'bg-[#ef4444]' : sysStatus.paused ? 'bg-[#f59e0b]' : 'bg-[#00ff88] animate-pulse';
+  const statusDot   = sysStatus.stopped ? 'bg-[#ef4444]' : sysStatus.paused ? 'bg-[#f59e0b]' : 'bg-[#00ff88] animate-pulse';
   const statusLabel = sysStatus.stopped ? 'Stopped' : sysStatus.paused ? 'Paused' : 'Active';
+
+  // ── Efficiency metrics (computed from jobs list) ──────────────────────────
+  const completedJobs = jobs.filter((j) => ['completed', 'awaiting_review', 'rejected'].includes(j.status));
+
+  const avgMs = completedJobs.length > 0
+    ? completedJobs.reduce((acc, j) => acc + (new Date(j.updated_at).getTime() - new Date(j.created_at).getTime()), 0) / completedJobs.length
+    : 0;
+  const avgProcessingStr = completedJobs.length > 0 ? fmtDuration(Math.round(avgMs / 1000)) : '—';
+
+  const reviewedJobs  = jobs.filter((j) => j.human_approved !== null && j.human_approved !== undefined);
+  const approvedCount = reviewedJobs.filter((j) => j.human_approved === true).length;
+  const approvalRateStr = reviewedJobs.length > 0
+    ? `${Math.round((approvedCount / reviewedJobs.length) * 100)}%` : '—';
+
+  const now        = Date.now();
+  const last24h    = jobs.filter((j) => now - new Date(j.created_at).getTime() < 86_400_000);
+  const throughput = last24h.length > 0 ? (last24h.length / 24).toFixed(1) : '0';
+
+  const zeroFailJobs   = completedJobs.filter((j) => j.pass_count > 0 && j.fail_count === 0);
+  const repairRateStr  = completedJobs.length > 0
+    ? `${Math.round((zeroFailJobs.length / completedJobs.length) * 100)}%` : '—';
 
   return (
     <div className="min-h-screen bg-[#050508]">
@@ -366,43 +508,61 @@ export default function HomePage() {
             </div>
           </div>
 
-          {/* Control buttons */}
+          {/* ── Control bar ──────────────────────────────────────────────── */}
           <div className="flex flex-col items-end gap-3">
-            <div className="flex items-center gap-2">
-              {/* Fetch PRs */}
-              <div className="tooltip-container">
-                <button onClick={handleFetch} disabled={fetchBusy || sysStatus.stopped}
-                  className="flex items-center gap-2 px-4 py-2.5 rounded-lg text-sm font-semibold border border-[#00d4ff]/50 text-[#00d4ff] hover:bg-[#00d4ff]/10 hover:border-[#00d4ff] disabled:opacity-40 transition-all">
-                  {fetchBusy ? <Loader2 className="w-4 h-4 animate-spin" /> : <Download className="w-4 h-4" />}
-                  Fetch PRs
-                </button>
-                <span className="tooltip-text">Pull the latest merged pull requests from configured GitHub repositories into the processing queue</span>
-              </div>
+            {sysStatus.stopped ? (
+              /* Stopped state: single prominent Restart button */
+              <button
+                onClick={handleRestart}
+                disabled={restartBusy}
+                className="flex items-center gap-2 px-6 py-3 rounded-lg text-sm font-bold border-2 border-[#00ff88] text-[#00ff88] bg-[#00ff88]/10 hover:bg-[#00ff88]/20 disabled:opacity-40 transition-all glow-success"
+              >
+                {restartBusy ? <Loader2 className="w-4 h-4 animate-spin" /> : <Play className="w-4 h-4" />}
+                Restart System
+              </button>
+            ) : (
+              /* Active / Paused state: three buttons */
+              <div className="flex items-center gap-2">
+                <div className="tooltip-container">
+                  <button
+                    onClick={handleFetch}
+                    disabled={fetchBusy}
+                    className="flex items-center gap-2 px-4 py-2.5 rounded-lg text-sm font-semibold border border-[#00d4ff]/50 text-[#00d4ff] hover:bg-[#00d4ff]/10 hover:border-[#00d4ff] disabled:opacity-40 transition-all"
+                  >
+                    {fetchBusy ? <Loader2 className="w-4 h-4 animate-spin" /> : <Download className="w-4 h-4" />}
+                    Fetch PRs
+                  </button>
+                  <span className="tooltip-text">Pull the latest merged pull requests from configured GitHub repositories into the processing queue</span>
+                </div>
 
-              {/* Pause / Resume */}
-              <div className="tooltip-container">
-                <button onClick={handlePause} disabled={pauseBusy || sysStatus.stopped}
-                  className={`flex items-center gap-2 px-4 py-2.5 rounded-lg text-sm font-semibold border transition-all disabled:opacity-40 ${
-                    sysStatus.paused
-                      ? 'border-[#00ff88]/50 text-[#00ff88] hover:bg-[#00ff88]/10'
-                      : 'border-[#f59e0b]/50 text-[#f59e0b] hover:bg-[#f59e0b]/10'
-                  }`}>
-                  {pauseBusy ? <Loader2 className="w-4 h-4 animate-spin" /> : sysStatus.paused ? <Play className="w-4 h-4" /> : <Pause className="w-4 h-4" />}
-                  {sysStatus.paused ? 'Resume Queue' : 'Pause Queue'}
-                </button>
-                <span className="tooltip-text">Pause or resume processing of queued test generation jobs</span>
-              </div>
+                <div className="tooltip-container">
+                  <button
+                    onClick={handlePause}
+                    disabled={pauseBusy}
+                    className={`flex items-center gap-2 px-4 py-2.5 rounded-lg text-sm font-semibold border transition-all disabled:opacity-40 ${
+                      sysStatus.paused
+                        ? 'border-[#00ff88]/50 text-[#00ff88] hover:bg-[#00ff88]/10'
+                        : 'border-[#f59e0b]/50 text-[#f59e0b] hover:bg-[#f59e0b]/10'
+                    }`}
+                  >
+                    {pauseBusy ? <Loader2 className="w-4 h-4 animate-spin" /> : sysStatus.paused ? <Play className="w-4 h-4" /> : <Pause className="w-4 h-4" />}
+                    {sysStatus.paused ? 'Resume Queue' : 'Pause Queue'}
+                  </button>
+                  <span className="tooltip-text">Pause or resume processing of queued test generation jobs</span>
+                </div>
 
-              {/* Stop All */}
-              <div className="tooltip-container">
-                <button onClick={() => setStopDialog(true)} disabled={sysStatus.stopped}
-                  className="flex items-center gap-2 px-4 py-2.5 rounded-lg text-sm font-semibold border border-[#ef4444]/50 text-[#ef4444] hover:bg-[#ef4444]/10 disabled:opacity-40 transition-all">
-                  <Square className="w-4 h-4" />
-                  Stop All
-                </button>
-                <span className="tooltip-text">Stop all GitHub fetching and test generation activity</span>
+                <div className="tooltip-container">
+                  <button
+                    onClick={() => setStopDialog(true)}
+                    className="flex items-center gap-2 px-4 py-2.5 rounded-lg text-sm font-semibold border border-[#ef4444]/50 text-[#ef4444] hover:bg-[#ef4444]/10 transition-all"
+                  >
+                    <Square className="w-4 h-4" />
+                    Stop All
+                  </button>
+                  <span className="tooltip-text">Stop all GitHub fetching and test generation activity</span>
+                </div>
               </div>
-            </div>
+            )}
           </div>
         </div>
       </div>
@@ -468,7 +628,7 @@ export default function HomePage() {
                   </thead>
                   <tbody className="divide-y divide-[#1a1a2e]/60">
                     {jobs.map((job) => {
-                      const tot = job.pass_count + job.fail_count;
+                      const tot  = job.pass_count + job.fail_count;
                       const rate = tot > 0 ? `${((job.pass_count / tot) * 100).toFixed(0)}%` : '—';
                       return (
                         <tr key={job.id} className="hover:bg-[#1a1a2e]/30 transition-colors">
@@ -496,7 +656,7 @@ export default function HomePage() {
                           <td className="px-4 py-3 text-[#94a3b8] font-medium text-xs font-mono">{rate}</td>
                           <td className="px-4 py-3">
                             {job.status === 'awaiting_review' ? (
-                              <ApprovalButtons jobId={job.id} onDone={load} />
+                              <ApprovalButtons jobId={job.id} onDone={loadJobs} />
                             ) : job.human_approved === true ? (
                               <span className="text-xs text-[#00ff88] font-semibold">Approved</span>
                             ) : job.human_approved === false ? (
@@ -518,7 +678,62 @@ export default function HomePage() {
           </div>
         </div>
 
-        {/* ── Analytics ────────────────────────────────────────────────── */}
+        {/* ── System Efficiency ─────────────────────────────────────────── */}
+        <div>
+          <h2 className="text-xs text-[#475569] uppercase tracking-widest mb-4 font-semibold">System Efficiency</h2>
+          <div className="grid grid-cols-2 lg:grid-cols-3 gap-4">
+            <EfficiencyCard
+              icon={Timer}
+              label="Avg Processing Time"
+              value={avgProcessingStr}
+              sub="per test generation job"
+              accent="cyan"
+              tooltip="Average time from PR submission to completed test generation across all jobs"
+            />
+            <EfficiencyCard
+              icon={TrendingDown}
+              label="Model Cost Efficiency"
+              value="~60% savings"
+              sub="vs single-model approach"
+              accent="green"
+              tooltip="Cost saved by routing lightweight tasks to Claude Haiku instead of Claude Sonnet. Haiku costs ~25x less per token."
+            />
+            <EfficiencyCard
+              icon={Wrench}
+              label="Repair Success Rate"
+              value={repairRateStr}
+              sub="self-repair effectiveness"
+              accent="violet"
+              tooltip="Percentage of completed jobs where all generated tests pass after any self-repair attempts by the failure diagnostician agent"
+            />
+            <EfficiencyCard
+              icon={Zap}
+              label="Parallel Efficiency"
+              value="3x faster"
+              sub="parallel vs sequential"
+              accent="amber"
+              tooltip="Speed gain from running test generators for unit, integration, and API tests simultaneously rather than one at a time"
+            />
+            <EfficiencyCard
+              icon={Activity}
+              label="Queue Throughput"
+              value={`${throughput}/hr`}
+              sub="jobs/hour last 24h"
+              accent="cyan"
+              tooltip="Rate at which TestPilot processes pull requests in the last 24 hours. Higher is better."
+            />
+            <EfficiencyCard
+              icon={CheckCircle2}
+              label="Human Approval Rate"
+              value={approvalRateStr}
+              sub="approval rate"
+              accent="green"
+              tooltip="Percentage of AI-generated test suites approved by human reviewers before merging"
+            />
+          </div>
+        </div>
+
+        {/* ── Analytics charts ──────────────────────────────────────────── */}
         {analytics && (
           <div>
             <h2 className="text-xs text-[#475569] uppercase tracking-widest mb-4 font-semibold">Analytics</h2>

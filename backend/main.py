@@ -49,8 +49,9 @@ async def lifespan(_app: FastAPI) -> AsyncGenerator[None, None]:
     _ensure_sqs_queue(settings)
     await _check_langfuse(settings)
 
-    from backend.job_processor import consume_jobs
+    from backend.job_processor import consume_jobs, set_consumer_task
     consumer_task = asyncio.create_task(consume_jobs(), name="sqs-consumer")
+    set_consumer_task(consumer_task)
 
     yield
 
@@ -381,6 +382,13 @@ async def stop_system() -> dict[str, Any]:
     from backend.job_processor import stop_consumer
     stop_consumer()
     return {"stopped": True, "paused": True}
+
+
+@app.post("/system/restart")
+async def restart_system_endpoint() -> dict[str, Any]:
+    from backend.job_processor import restart_consumer
+    await restart_consumer()
+    return {"paused": False, "stopped": False, "active": True}
 
 
 @app.post("/system/fetch-github")

@@ -64,6 +64,10 @@ export async function stopSystem(): Promise<void> {
   await apiFetch('/system/stop', { method: 'POST' });
 }
 
+export async function restartSystem(): Promise<void> {
+  await apiFetch('/system/restart', { method: 'POST' });
+}
+
 export async function fetchGithub(): Promise<{ jobs_created: number; job_ids: string[] }> {
   return apiFetch('/system/fetch-github', { method: 'POST' });
 }
