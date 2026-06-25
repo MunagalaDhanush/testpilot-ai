@@ -156,6 +156,14 @@ async def consume_jobs() -> None:
 
     logger.info(f"SQS consumer started — polling {queue_url} every {SQS_POLL_INTERVAL}s")
 
+    async def _process_and_ack(job_id: str, receipt: str) -> None:
+        try:
+            await process_job(job_id)
+            sqs.delete_message(QueueUrl=queue_url, ReceiptHandle=receipt)
+            logger.info(f"SQS: deleted message for job_id={job_id}")
+        except Exception as e:
+            logger.error(f"SQS: job processing failed, leaving message for retry: {e}")
+
     while True:
         try:
             if _consumer_stopped:
@@ -167,23 +175,20 @@ async def consume_jobs() -> None:
 
             response = sqs.receive_message(
                 QueueUrl=queue_url,
-                MaxNumberOfMessages=1,
+                MaxNumberOfMessages=3,
                 WaitTimeSeconds=5,
                 VisibilityTimeout=300,
             )
             messages = response.get("Messages", [])
 
-            for msg in messages:
-                receipt = msg["ReceiptHandle"]
-                try:
+            if messages:
+                tasks = []
+                for msg in messages:
                     body = json.loads(msg["Body"])
                     job_id: str = body["job_id"]
                     logger.info(f"SQS: received job_id={job_id}")
-                    await process_job(job_id)
-                    sqs.delete_message(QueueUrl=queue_url, ReceiptHandle=receipt)
-                    logger.info(f"SQS: deleted message for job_id={job_id}")
-                except Exception as e:
-                    logger.error(f"SQS: job processing failed, leaving message for retry: {e}")
+                    tasks.append(_process_and_ack(job_id, msg["ReceiptHandle"]))
+                await asyncio.gather(*tasks, return_exceptions=True)
 
         except asyncio.CancelledError:
             logger.info("SQS consumer shutting down")
